@@ -1,0 +1,23 @@
+{
+  "name": "claude-queue-worker",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Poll a Google Sheet queue and process prompts with Claude Code CLI",
+  "main": "worker.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node worker.js",
+    "submit": "node submit.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sammersheikh/claude-queue.git"
+  },
+  "license": "MIT"
+}
