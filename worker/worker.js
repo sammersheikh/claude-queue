@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { valuesGet, valuesBatchUpdate } = require('./gws');
 const { parseEvent } = require('./streamParser');
+const localModel = require('./localModel');
 
 const LOCK_PATH = path.join(__dirname, '.worker.lock');
 
@@ -16,6 +17,14 @@ const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000', 10);
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || '';
 const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_SEC || '300', 10) * 1000;
 const WORKER_ID = `${os.hostname()}-${process.pid}`;
+
+// Fallback policy. The local server and `claude -p` back each other up, so a
+// row only ends in `error` when both engines are unavailable. Each direction is
+// separately switchable.
+//   LOCAL_FALLBACK_FROM_CLAUDE=1  claude fails/times out  -> retry on the local server
+//   LOCAL_FALLBACK_TO_CLAUDE=1    local fails/unavailable -> retry on claude
+const FALLBACK_FROM_CLAUDE = process.env.LOCAL_FALLBACK_FROM_CLAUDE !== '0';
+const FALLBACK_TO_CLAUDE = process.env.LOCAL_FALLBACK_TO_CLAUDE !== '0';
 
 // Column layout (0-indexed reads, A1-letters for writes):
 // A id | B prompt | C status | D created_at | E response
@@ -231,6 +240,58 @@ async function writeError(rowNumber, message) {
   ]);
 }
 
+// Run one prompt on the local OpenAI-compatible server. Reports the answer on
+// success, or throws with a message that says why it could not be used.
+async function runLocal(prompt, opts) {
+  opts = opts || {};
+  if (!(await localModel.isAvailable())) {
+    throw new Error(`local model server not reachable at ${localModel.baseUrl()}`);
+  }
+  return localModel.generate(prompt, {
+    systemPrompt: opts.systemPrompt,
+    maxTokens: opts.maxTokens,
+  });
+}
+
+// Run a prompt with whichever engine applies, applying the fallback policy.
+// Returns { response, engine } where engine is the one that produced the answer.
+async function runWithFallback(prompt, model, opts) {
+  opts = opts || {};
+  const wantedLocal = localModel.isLocalModel(model);
+  const tools = opts.tools || '';
+
+  // Tool-use rows stay on claude: the local server has no tool loop here, and
+  // silently dropping an allowlist would be worse than not running the row.
+  if (wantedLocal && tools) {
+    throw new Error(
+      `model "${model}" routes to the local server, which does not support the tools column; ` +
+      `use a claude model for tool-use rows`
+    );
+  }
+
+  if (wantedLocal) {
+    try {
+      return { response: await runLocal(prompt, opts), engine: 'local' };
+    } catch (localErr) {
+      if (!FALLBACK_TO_CLAUDE) throw localErr;
+      log(`local model failed (${localErr.message}); falling back to claude`);
+      const response = await runClaude(prompt, '', { tools: '', rowNumber: opts.rowNumber });
+      return { response, engine: 'claude (local fallback)' };
+    }
+  }
+
+  try {
+    const response = await runClaude(prompt, model, { tools, rowNumber: opts.rowNumber });
+    return { response, engine: 'claude' };
+  } catch (claudeErr) {
+    if (!FALLBACK_FROM_CLAUDE) throw claudeErr;
+    if (tools) throw claudeErr; // local cannot honour the tools allowlist
+    log(`claude failed (${claudeErr.message}); falling back to local model`);
+    const response = await runLocal(prompt, opts);
+    return { response, engine: 'local (claude fallback)' };
+  }
+}
+
 async function tick() {
   const pending = await fetchPending();
   if (!pending.length) return;
@@ -246,9 +307,9 @@ async function tick() {
       continue;
     }
     try {
-      const response = await runClaude(prompt, model, { tools, rowNumber });
+      const { response, engine } = await runWithFallback(prompt, model, { tools, rowNumber });
       await writeResponse(rowNumber, response);
-      log(`row ${rowNumber} done (id=${id})`);
+      log(`row ${rowNumber} done (id=${id}, engine=${engine})`);
     } catch (err) {
       const msg = err.message || String(err);
       await writeError(rowNumber, msg);
@@ -260,6 +321,9 @@ async function tick() {
 async function main() {
   acquireSingletonLock();
   log(`worker ${WORKER_ID} polling ${SHEET_ID}/${SHEET_NAME} every ${POLL_INTERVAL}ms`);
+  log(`fallback policy: claude->local ${FALLBACK_FROM_CLAUDE ? 'on' : 'off'}, ` +
+      `local->claude ${FALLBACK_TO_CLAUDE ? 'on' : 'off'}, ` +
+      `local server ${localModel.baseUrl()}`);
   let running = false;
   setInterval(async () => {
     if (running) return;

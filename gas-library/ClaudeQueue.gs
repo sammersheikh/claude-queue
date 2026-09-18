@@ -32,11 +32,18 @@ const ClaudeQueue = (function () {
    * Append a prompt to the queue. Returns the row id.
    *
    * opts:
-   *   - model:   string, written to column H
+   *   - model:   string, written to column H. Either a claude model name
+   *              ("claude-sonnet-4-6") or a local alias ("local", "bonsai",
+   *              "bonsai2") to run on the local llama-server. Leave blank to
+   *              use the worker's DEFAULT_MODEL. A local row that fails falls
+   *              back to claude, and vice versa, per the worker's fallback
+   *              policy.
    *   - tools:   string, written to column J. When non-empty, the worker runs
    *              `claude -p` with --allowed-tools set to this value and
    *              --permission-mode bypassPermissions so tool use is auto-approved.
    *              Example: "Bash(gws sheets values get:*)"
+   *              Tool-use rows always run on claude; a local model name with a
+   *              tools value is rejected rather than silently dropped.
    *   - context: object, JSON-stringified into column L for the worker to pass
    *              through or for the prompt to reference.
    */

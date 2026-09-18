@@ -103,6 +103,52 @@ Tool-use prompts are still single-turn and stateless from Claude's side.
 
 **Security:** `--permission-mode bypassPermissions` auto-approves every tool call Claude emits. Safety depends entirely on the `tools` allowlist the caller supplies. Keep it narrow (e.g. `Bash(gws sheets values get:*)`). Broad patterns like `Bash(*)` grant Claude arbitrary shell access on the worker machine. Anyone with write access to the queue sheet can enqueue work, so do not widen the sheet's share scope beyond trusted callers.
 
+## Local model (optional)
+
+The worker can also run prompts on a local OpenAI-compatible server instead of `claude -p`. This is useful for offline work, for prompts you would rather not send to a hosted API, and as a second engine so a row only fails when both are down.
+
+The intended server is [PrismML's Bonsai 2 27B](https://github.com/PrismML-Eng/Bonsai-demo) on `llama-server`, but anything exposing `POST /v1/chat/completions` works.
+
+### Routing
+
+A row routes local when the **model** column (H) holds one of:
+
+- `local`
+- `bonsai`, `bonsai2`, `bonsai-27b`, `bonsai2-27b`, `ternary-bonsai`
+- anything prefixed `local:` (e.g. `local:bonsai-27b`)
+
+Any other value, including an empty cell, goes to `claude -p` as before.
+
+### Fallback
+
+Both directions are on by default, so a row errors only when both engines are unavailable:
+
+| Direction | Env var | Behavior |
+|-----------|---------|----------|
+| claude to local | `LOCAL_FALLBACK_FROM_CLAUDE` | `claude -p` fails or times out, retry on the local server |
+| local to claude | `LOCAL_FALLBACK_TO_CLAUDE` | local server down or errors, retry on `claude -p` |
+
+Set either to `0` to disable. Each response is logged with the engine that produced it, so `worker.log` shows which path ran.
+
+**Tool-use rows are claude-only.** The local path here has no tool loop, so a row with a `tools` value and a local model name is rejected rather than silently run without the allowlist. A claude tool row that fails does not fall back to local for the same reason.
+
+### Running the server
+
+```sh
+cd ~/Projects/bonsai-demo
+PORT=8091 BONSAI_CTX=32768 ./scripts/start_llama_server.sh
+```
+
+Port 8091 is the convention here because 8080 is often taken. The worker defaults to `http://127.0.0.1:8091`.
+
+On an M5 Mac the Metal tensor-API probe can fail to compile against the OS headers. The server still runs at full Metal speed, but set `GGML_METAL_TENSOR_DISABLE=1` to skip the probe and avoid the error. `scripts/` in the demo repo and the launchd unit below both set it.
+
+To keep the server always up, install a launchd unit (see `com.bonsai.llama-server.plist` in `~/Library/LaunchAgents/`), which starts it at login and restarts it if it dies.
+
+### Latency expectations
+
+On an M5 with 24 GB, Bonsai 2 27B decodes at roughly 13 tok/s. Fine for background queue work, not for interactive chat. The model thinks by default, and thinking consumes the `max_tokens` budget, so `LOCAL_MODEL_REASONING_BUDGET=0` is the default here: it is much faster and is the right setting for classification, extraction, and short answers. Raise it for prompts that need reasoning.
+
 ## Operational notes
 
 - **Run one worker at a time** for a given sheet. The claim step is verify-after-write, not atomic; two workers can race the same row.
@@ -120,6 +166,8 @@ See `worker/.env.example`. Required:
 | `SHEET_ID` | Google Spreadsheet ID of the queue |
 
 Optional: `SHEET_NAME` (default `Queue`), `POLL_INTERVAL` (ms), `DEFAULT_MODEL`, `CLAUDE_TIMEOUT_SEC`, `GWS_BIN`.
+
+Local model: `LOCAL_MODEL_ENABLED`, `LOCAL_MODEL_URL`, `LOCAL_MODEL_NAME`, `LOCAL_MODEL_TIMEOUT_SEC`, `LOCAL_MODEL_MAX_TOKENS`, `LOCAL_MODEL_REASONING_BUDGET`, `LOCAL_FALLBACK_FROM_CLAUDE`, `LOCAL_FALLBACK_TO_CLAUDE`. See `.env.example` for the full list and defaults.
 
 ## License
 

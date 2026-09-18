@@ -25,10 +25,23 @@ Create your own spreadsheet. Put the ID only in `worker/.env` (`SHEET_ID`) and i
 
 ## Key files
 
-- `worker/worker.js` — polling loop, claim + spawn + writeback
+- `worker/worker.js` — polling loop, claim + spawn + writeback, engine routing + fallback
+- `worker/localModel.js` — HTTP client for a local OpenAI-compatible server (llama-server)
 - `worker/gws.js` — wrapper for `gws sheets` calls
 - `worker/submit.js` — CLI smoke test
 - `gas-library/ClaudeQueue.gs` — `submit` / `status` / `poll` / `ask`
+
+## Local model engine (Bonsai 2 27B)
+
+Optional second engine, so a row only errors when both engines are down. Configured in `worker/.env`.
+
+- Routes local when the model column (H) is `local` / `bonsai` / `bonsai2` / `bonsai-27b` / `bonsai2-27b` / `ternary-bonsai`, or anything prefixed `local:`. Everything else goes to `claude -p`.
+- Fallback both ways: `LOCAL_FALLBACK_FROM_CLAUDE` (claude fails, retry local) and `LOCAL_FALLBACK_TO_CLAUDE` (local down, retry claude), both default on.
+- Tool-use rows are claude-only; a local model name with a `tools` value is rejected, not silently run without the allowlist.
+- Server: PrismML's Bonsai-demo at `~/Projects/bonsai-demo`, `PORT=8091` (8080 is taken by xteink-x3). Managed by launchd unit `com.bonsai.llama-server` so it starts at login and restarts on crash.
+- On M5 Macs set `GGML_METAL_TENSOR_DISABLE=1` (in the plist) to skip a Metal tensor-API probe that fails to compile on macOS 26 headers; full Metal speed is kept.
+- `LOCAL_MODEL_REASONING_BUDGET=0` by default. The model thinks by default and thinking eats the `max_tokens` budget; at ~13 tok/s on an M5 that is most of the wall time.
+- ~13 tok/s decode on an M5 with 24 GB. Background queue work only, not interactive.
 
 ## Running
 
