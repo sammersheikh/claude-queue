@@ -8,6 +8,7 @@ const path = require('path');
 const { valuesGet, valuesBatchUpdate } = require('./gws');
 const { parseEvent } = require('./streamParser');
 const localModel = require('./localModel');
+const { claudeExitMessage, combinedFailure } = require('./engineErrors');
 
 const LOCK_PATH = path.join(__dirname, '.worker.lock');
 
@@ -209,7 +210,7 @@ function runClaude(prompt, model, opts) {
       if (progress) await progress.finalize();
 
       if (killed) return reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS}ms`));
-      if (code !== 0) return reject(new Error(stderr.trim() || `claude exited with code ${code}`));
+      if (code !== 0) return reject(new Error(claudeExitMessage(code, stderr, stdoutBuf)));
 
       if (tools) {
         if (streamError) return reject(new Error(streamError));
@@ -275,8 +276,12 @@ async function runWithFallback(prompt, model, opts) {
     } catch (localErr) {
       if (!FALLBACK_TO_CLAUDE) throw localErr;
       log(`local model failed (${localErr.message}); falling back to claude`);
-      const response = await runClaude(prompt, '', { tools: '', rowNumber: opts.rowNumber });
-      return { response, engine: 'claude (local fallback)' };
+      try {
+        const response = await runClaude(prompt, '', { tools: '', rowNumber: opts.rowNumber });
+        return { response, engine: 'claude (local fallback)' };
+      } catch (claudeErr) {
+        throw combinedFailure('local', localErr, 'claude', claudeErr);
+      }
     }
   }
 
@@ -287,8 +292,12 @@ async function runWithFallback(prompt, model, opts) {
     if (!FALLBACK_FROM_CLAUDE) throw claudeErr;
     if (tools) throw claudeErr; // local cannot honour the tools allowlist
     log(`claude failed (${claudeErr.message}); falling back to local model`);
-    const response = await runLocal(prompt, opts);
-    return { response, engine: 'local (claude fallback)' };
+    try {
+      const response = await runLocal(prompt, opts);
+      return { response, engine: 'local (claude fallback)' };
+    } catch (localErr) {
+      throw combinedFailure('claude', claudeErr, 'local', localErr);
+    }
   }
 }
 
