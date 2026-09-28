@@ -210,7 +210,7 @@ function runClaude(prompt, model, opts) {
       if (progress) await progress.finalize();
 
       if (killed) return reject(new Error(`claude timed out after ${CLAUDE_TIMEOUT_MS}ms`));
-      if (code !== 0) return reject(new Error(claudeExitMessage(code, stderr, stdoutBuf)));
+      if (code !== 0) return reject(new Error(claudeExitMessage(code, stderr, stdoutBuf, tools ? streamError : '')));
 
       if (tools) {
         if (streamError) return reject(new Error(streamError));

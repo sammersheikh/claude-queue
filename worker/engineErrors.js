@@ -10,8 +10,14 @@ const MAX_DETAIL = 500;
 // `claude -p` prints its own failures (API errors, usage limits, auth problems)
 // on STDOUT and exits 1 with stderr empty. Reporting only stderr turned every
 // one of those into a bare "exited with code 1", so read stdout as a fallback.
-function claudeExitMessage(code, stderr, stdout) {
-  const detail = String(stderr || '').trim() || String(stdout || '').trim().slice(0, MAX_DETAIL);
+//
+// In tools mode (stream-json) stdout is drained line by line into the stream
+// parser, so at exit it holds nothing useful, and the failure arrives as a
+// stream error event instead. The caller passes that as streamError, and it
+// wins: it is the most specific reason there is.
+function claudeExitMessage(code, stderr, stdout, streamError) {
+  const detail = String(streamError || '').trim().slice(0, MAX_DETAIL) ||
+    String(stderr || '').trim() || String(stdout || '').trim().slice(0, MAX_DETAIL);
   return detail
     ? `claude exited with code ${code}: ${detail}`
     : `claude exited with code ${code}`;
