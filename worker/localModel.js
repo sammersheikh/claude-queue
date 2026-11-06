@@ -106,6 +106,12 @@ async function isAvailable({ ttlMs = 15000 } = {}) {
   return ok;
 }
 
+// Thinking models emit a leading <think>...</think> block even with a zero
+// budget (it comes back empty). Callers JSON.parse the response, so drop it.
+function stripThink(raw) {
+  return String(raw).replace(/^\s*<think>[\s\S]*?<\/think>/i, '').trim();
+}
+
 async function generate(prompt, opts) {
   opts = opts || {};
   const messages = [];
@@ -131,7 +137,7 @@ async function generate(prompt, opts) {
 
   const res = await call('POST', '/v1/chat/completions', body, TIMEOUT_MS);
   const choice = (res.choices && res.choices[0]) || {};
-  const text = String((choice.message && choice.message.content) || '').trim();
+  const text = stripThink((choice.message && choice.message.content) || '');
   if (text) return text;
 
   if (choice.finish_reason === 'length') {
@@ -143,4 +149,4 @@ async function generate(prompt, opts) {
   throw new Error('local model returned an empty response');
 }
 
-module.exports = { isLocalModel, isAvailable, generate, baseUrl };
+module.exports = { isLocalModel, isAvailable, generate, baseUrl, stripThink };
