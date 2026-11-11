@@ -9,6 +9,7 @@ const { valuesGet, valuesBatchUpdate } = require('./gws');
 const { parseEvent } = require('./streamParser');
 const localModel = require('./localModel');
 const { claudeExitMessage, combinedFailure } = require('./engineErrors');
+const { buildClaudeArgs, rowFlags } = require('./claudeArgs');
 
 const LOCK_PATH = path.join(__dirname, '.worker.lock');
 
@@ -133,23 +134,25 @@ async function claimRow(rowNumber) {
   return check[0]?.[0] === WORKER_ID;
 }
 
+function noToolsDir() {
+  const dir = path.join(os.tmpdir(), 'claude-queue-notools');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function runClaude(prompt, model, opts) {
   opts = opts || {};
   const tools = opts.tools || '';
   const rowNumber = opts.rowNumber;
 
   return new Promise((resolve, reject) => {
-    const args = ['-p'];
-    if (model) args.push('--model', model);
-    if (tools) {
-      args.push('--allowed-tools', tools);
-      args.push('--permission-mode', 'bypassPermissions');
-      args.push('--output-format', 'stream-json');
-      args.push('--verbose');
-    }
-    args.push(prompt);
+    const args = buildClaudeArgs(prompt, model, { tools, noTools: opts.noTools });
+    // A tool-less row also runs from an empty folder, so even a CLI change that
+    // re-enabled a tool would find nothing to read.
+    const spawnOpts = { stdio: ['ignore', 'pipe', 'pipe'] };
+    if (!tools && opts.noTools) spawnOpts.cwd = noToolsDir();
 
-    const child = spawn('claude', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('claude', args, spawnOpts);
     let stdoutBuf = '';
     let stderr = '';
     let finalText = '';
@@ -277,7 +280,7 @@ async function runWithFallback(prompt, model, opts) {
       if (!FALLBACK_TO_CLAUDE) throw localErr;
       log(`local model failed (${localErr.message}); falling back to claude`);
       try {
-        const response = await runClaude(prompt, '', { tools: '', rowNumber: opts.rowNumber });
+        const response = await runClaude(prompt, '', { tools: '', rowNumber: opts.rowNumber, noTools: opts.noTools });
         return { response, engine: 'claude (local fallback)' };
       } catch (claudeErr) {
         throw combinedFailure('local', localErr, 'claude', claudeErr);
@@ -286,7 +289,7 @@ async function runWithFallback(prompt, model, opts) {
   }
 
   try {
-    const response = await runClaude(prompt, model, { tools, rowNumber: opts.rowNumber });
+    const response = await runClaude(prompt, model, { tools, rowNumber: opts.rowNumber, noTools: opts.noTools });
     return { response, engine: 'claude' };
   } catch (claudeErr) {
     if (!FALLBACK_FROM_CLAUDE) throw claudeErr;
@@ -309,14 +312,15 @@ async function tick() {
     const prompt = row[COL.prompt];
     const model = row[COL.model] || DEFAULT_MODEL || '';
     const tools = row[COL.tools] || '';
-    log(`claiming row ${rowNumber} (id=${id}, tools=${tools ? 'yes' : 'no'})`);
+    const { noTools } = rowFlags(row[COL.context]);
+    log(`claiming row ${rowNumber} (id=${id}, tools=${tools ? 'yes' : noTools ? 'disabled' : 'no'})`);
     const won = await claimRow(rowNumber);
     if (!won) {
       log(`row ${rowNumber} already claimed, skipping`);
       continue;
     }
     try {
-      const { response, engine } = await runWithFallback(prompt, model, { tools, rowNumber });
+      const { response, engine } = await runWithFallback(prompt, model, { tools, rowNumber, noTools });
       await writeResponse(rowNumber, response);
       log(`row ${rowNumber} done (id=${id}, engine=${engine})`);
     } catch (err) {
